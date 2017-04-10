@@ -11,7 +11,27 @@ MY PROJECTS -*- mode: org; -*-
  - 简化TCP/UDP链接管理
  - 业务逻辑支持Lua
 
+* 编译运行
+由于引入了redis等第三方程序，本工程代码编译后可执行文件有多个，它们需要
+独立启动运行，并且有一定的逻辑依赖关系，在使用或自动化启动、升级流程时
+需注意！
 
+** 编译
+  #+BEGIN_EXAMPLE
+  编译
+  $ cd ${free}
+  $ git submodule update --init --recursive
+  $ mkdir build
+  $ cd build
+  $ cmake ..
+  $ make
+  #+END_EXAMPLE
 
+** 运行REDIS
+  #+BEGIN_EXAMPLE
+  运行redis
+  $ cd ${free}/build
+  $ ./bin/redis-server ../script/redis.conf
+  #+END_EXAMPLE
 
 
