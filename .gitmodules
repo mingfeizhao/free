@@ -1,6 +1,6 @@
 [submodule "deps/redis"]
 	path = deps/redis
 	url = https://github.com/antirez/redis.git
-[submodule "deps/libev"]
-	path = deps/libev
-	url = https://github.com/enki/libev.git
+[submodule "deps/cjson"]
+	path = deps/cjson
+	url = https://github.com/DaveGamble/cJSON.git
