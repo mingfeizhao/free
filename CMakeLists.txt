@@ -35,20 +35,26 @@ include_directories(${DEPS_INCLUDE})
 
 #编译redis
 set(REDIS_SRC "${CMAKE_SOURCE_DIR}/deps/redis")
-set(REDIS_SERVER "src/redis-server")
-set(REDIS_CLI "src/redis-cli")
-if(NOT EXISTS ${DEPS_LIB}/${REDIS_SERVER})
+set(REDIS_SERVER "redis-server")
+set(REDIS_CLI "redis-cli")
+set(REDIS_CLI_LIB "libhiredis.a")
+if((NOT EXISTS ${DEPS_BIN}/${REDIS_SERVER}) OR (NOT EXISTS ${DEPS_LIB}/${REDIS_CLI_LIB}))
     message(STATUS "building ${REDIS_SRC}")
 
     execute_process(
         COMMAND make distclean
         WORKING_DIRECTORY ${REDIS_SRC})
     execute_process(
-        COMMAND make
+        COMMAND make -j 8
         WORKING_DIRECTORY ${REDIS_SRC})
     execute_process(
-        COMMAND cp ${REDIS_SERVER}  ${DEPS_BIN}
-        COMMAND cp ${REDIS_CLI}  ${DEPS_BIN}
+        COMMAND cp src/${REDIS_SERVER}  ${DEPS_BIN}
+        COMMAND cp src/${REDIS_CLI}  ${DEPS_BIN}
+	COMMAND cp deps/hiredis/${REDIS_CLI_LIB}  ${DEPS_LIB}
+	COMMAND cp deps/hiredis/hiredis.h  ${DEPS_INCLUDE}
+	COMMAND cp deps/hiredis/read.h  ${DEPS_INCLUDE}
+	COMMAND cp deps/hiredis/sds.h  ${DEPS_INCLUDE}
+	
         WORKING_DIRECTORY ${REDIS_SRC})
     
     message(STATUS "done")
