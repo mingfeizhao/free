@@ -12,9 +12,9 @@ ADD_DEFINITIONS(-std=gnu99)
 
 ###指定Debug编译模式("$ cmake -DCMAKE_BUILD_TYPE=Debug ..")
 if(NOT CMAKE_BUILD_TYPE)
-    message(STATUS "Setting build type to 'Debug' as none was specified.")
-    set(CMAKE_BUILD_TYPE Debug)         #开发期间默认为Debug模式
-    #set(CMAKE_BUILD_TYPE Release)
+  message(STATUS "Setting build type to 'Debug' as none was specified.")
+  set(CMAKE_BUILD_TYPE Debug)         #开发期间默认为Debug模式
+  #set(CMAKE_BUILD_TYPE Release)
 endif() 
 set(CMAKE_C_FLAGS_DEBUG "$ENV{CFLAGS} -O0 -g -ggdb")
 set(CMAKE_C_FLAGS_RELEASE "$ENV{CFLAGS} -O3")
@@ -39,25 +39,68 @@ set(REDIS_SERVER "redis-server")
 set(REDIS_CLI "redis-cli")
 set(REDIS_CLI_LIB "libhiredis.a")
 if((NOT EXISTS ${DEPS_BIN}/${REDIS_SERVER}) OR (NOT EXISTS ${DEPS_LIB}/${REDIS_CLI_LIB}))
-    message(STATUS "building ${REDIS_SRC}")
+  message(STATUS "building ${REDIS_SRC}")
 
-    execute_process(
-        COMMAND make distclean
-        WORKING_DIRECTORY ${REDIS_SRC})
-    execute_process(
-        COMMAND make -j 8
-        WORKING_DIRECTORY ${REDIS_SRC})
-    execute_process(
-        COMMAND cp src/${REDIS_SERVER}  ${DEPS_BIN}
-        COMMAND cp src/${REDIS_CLI}  ${DEPS_BIN}
-	COMMAND cp deps/hiredis/${REDIS_CLI_LIB}  ${DEPS_LIB}
-	COMMAND cp deps/hiredis/hiredis.h  ${DEPS_INCLUDE}
-	COMMAND cp deps/hiredis/read.h  ${DEPS_INCLUDE}
-	COMMAND cp deps/hiredis/sds.h  ${DEPS_INCLUDE}
-	
-        WORKING_DIRECTORY ${REDIS_SRC})
-    
-    message(STATUS "done")
+  execute_process(
+    COMMAND make distclean
+    WORKING_DIRECTORY ${REDIS_SRC})
+  execute_process(
+    COMMAND make -j 8
+    WORKING_DIRECTORY ${REDIS_SRC})
+  execute_process(
+    COMMAND cp src/${REDIS_SERVER}  ${DEPS_BIN}
+    WORKING_DIRECTORY ${REDIS_SRC})
+  execute_process(
+    COMMAND cp src/${REDIS_CLI}  ${DEPS_BIN}
+    COMMAND cp deps/hiredis/${REDIS_CLI_LIB}  ${DEPS_LIB}
+    COMMAND cp deps/hiredis/hiredis.h  ${DEPS_INCLUDE}
+    COMMAND cp deps/hiredis/read.h  ${DEPS_INCLUDE}
+    COMMAND cp deps/hiredis/sds.h  ${DEPS_INCLUDE}
+    WORKING_DIRECTORY ${REDIS_SRC})
+  
+  message(STATUS "done")
+endif()
+
+#编译cjson
+set(CJSON_SRC "${CMAKE_SOURCE_DIR}/deps/cjson")
+set(CJSON_LIB_A "libcjson.a")
+set(CJSON_LIB_A_H "cJSON.h")
+if(NOT EXISTS ${DEPS_LIB}/${CJSON_LIB_A})
+  message(STATUS "building ${CJSON_SRC}")
+
+  execute_process(
+    COMMAND make clean
+    WORKING_DIRECTORY ${CJSON_SRC})    
+  execute_process(    
+    COMMAND make static
+    WORKING_DIRECTORY ${CJSON_SRC})    
+  execute_process(    
+    COMMAND cp ${CJSON_LIB_A}  ${DEPS_LIB}
+    COMMAND cp ${CJSON_LIB_A_H}  ${DEPS_INCLUDE}
+    WORKING_DIRECTORY ${CJSON_SRC})
+  
+  message(STATUS "done")
+endif()
+
+#编译libev
+set(LIBEV_SRC "${CMAKE_SOURCE_DIR}/deps/libev-4.24")
+set(LIBEV_LIB_A "libev.a")
+set(LIBEV_LIB_A_H "ev.h")
+if(NOT EXISTS ${DEPS_LIB}/${LIBEV_LIB_A})
+  message(STATUS "building ${LIBEV_SRC}")
+
+  execute_process(
+    COMMAND ./configure
+    WORKING_DIRECTORY ${LIBEV_SRC})
+  execute_process(
+    COMMAND make
+    WORKING_DIRECTORY ${LIBEV_SRC})
+  execute_process(
+    COMMAND cp .libs/${LIBEV_LIB_A}  ${DEPS_LIB}
+    COMMAND cp ${LIBEV_LIB_A_H}  ${DEPS_INCLUDE}
+    WORKING_DIRECTORY ${LIBEV_SRC})
+  
+  message(STATUS "done")
 endif()
 
 

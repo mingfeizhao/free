@@ -5,6 +5,17 @@ GRTAGS
 GSYMS
 GTAGS
 
+# libev
+deps/libev-4.24/.deps
+deps/libev-4.24/.libs
+deps/libev-4.24/Makefile
+deps/libev-4.24/config.h
+deps/libev-4.24/config.log
+deps/libev-4.24/config.status
+deps/libev-4.24/libtool
+deps/libev-4.24/stamp-h1
+
+
 # Object files
 *.o
 *.ko
