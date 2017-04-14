@@ -213,7 +213,7 @@ static void do_accept(EV_P_ ev_io *w, int revents)
 
     ev_io_init(&tmp_conn->read, do_tcp_read, fd, EV_READ);
     ev_io_init(&tmp_conn->write, do_tcp_write, fd, EV_WRITE);
-    ev_io_start(EV_A_  &conn->read);
+    ev_io_start(EV_A_  &tmp_conn->read);
 }
 
 /**
