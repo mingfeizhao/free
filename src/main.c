@@ -1,14 +1,43 @@
 #include "glb.h"
 #include "log.h"
 #include "redis.h"
+#include "libev.h"
+
+void rtcp_pkt(PKT *pkt)
+{
+    printf("tcp recv: %s\n", pkt->buff);
+    send_pkt(pkt);
+}
+void wtcp_pkt(PKT *pkt)
+{
+    printf("%s\n", __func__);
+    //close_pkt(pkt);
+}
+void rudp_pkt(PKT *pkt)
+{
+    printf("udp recv: %s\n", pkt->buff);
+    send_pkt(pkt);
+}
+
 
 int main(int argc, char** argv)
 {
-    if(log_init() != RET_OK) {
+    /* 各模块儿初始化 */
+    if (log_init() != RET_OK) {
+        exit(EXIT_FAILURE);
+    }
+    if (libev_init() != RET_OK) {
         exit(EXIT_FAILURE);
     }
 
+    /* 注册待监控插口 */
+    watch_tcp("127.0.0.1", 50000, rtcp_pkt, wtcp_pkt);
+    watch_udp("127.0.0.1", 50000, rudp_pkt, NULL);
 
+    /* 开启libev事件循环 */
+    event_loop();
+
+    
     while (1) {
         sleep(3);
         
