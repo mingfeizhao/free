@@ -5,6 +5,7 @@
 #include "glb.h"
 #include "libev.h"
 #include "idle.h"
+#include "log.h"
 
 /* 维护连接的信息结构 */
 typedef struct st_socket_conn_t {
@@ -16,8 +17,8 @@ typedef struct st_socket_conn_t {
     io_callback rcb;
     io_callback wcb;
     
-    struct sockaddr_in cip;          /* 记录客户端地址 */
-    
+    struct sockaddr_in ip;           /* 服务器角色，用于记录客户端地址；
+                                        客户端角色，用于记录服务器地址 */
     struct st_socket_conn_t *next;
 }SOCK_CONN;
 
@@ -71,16 +72,19 @@ MSG_DONTROUTE   [sendmsg]               直连网络, 不需要查找路由表
  * FIXME：本进程耗费的内存只增加不减少；如果链接信息结构会成为内存瓶颈，
  *        考虑设置经验阈值，空闲内存过多时，释放回系统
  */
-static SOCK_CONN *get_conn()
+    static SOCK_CONN *get_conn()
 {
     SOCK_CONN *tmp_conn = conn;
     if (conn) {
         conn = conn->next;
         tmp_conn->next = NULL;
     } else {
+        MY_WARN("%s", "need MALLOC new SOCK_CONN");
         tmp_conn = (SOCK_CONN*)malloc(sizeof(SOCK_CONN));
         if (tmp_conn) {
             (void)memset(tmp_conn, 0, sizeof(SOCK_CONN));
+        } else {
+            MY_ERR("%s", strerror(errno));
         }
     }
     
@@ -95,6 +99,7 @@ static void free_conn(SOCK_CONN *cn)
 static void clear_conn_res(SOCK_CONN *cn)
 {
     if (cn == NULL) {
+        MY_ERR("%s", "should NOT null");
         return;
     }
     close(cn->read.fd);
@@ -109,72 +114,119 @@ static void idle_cb (EV_P_ ev_idle *w, int revents)
     (void)idle_main();
 }
 
-static void do_tcp_read(EV_P_ ev_io *w, int revents)
+
+/**
+ * 通用读函数
+ * @param conn: 对应的网络层链路
+ * @param ip: 需要记录的远端设备地址
+ * @param close_conn_when_fin: 收到FIN后，是否关闭链接
+ */
+static void do_generic_read(SOCK_CONN* conn, bool store_remote_addr, bool close_conn_when_fin)
 {
-    SOCK_CONN *tmp_conn = (SOCK_CONN *)w->data;
     int len;
-
-    printf("%s\n", __func__);
-    if (revents & EV_ERROR) {
-        printf("%s/%s/%d\n", __FILE__, __func__, __LINE__);
-        return;
+    
+    /* 接收数据前初始化 */
+    if (store_remote_addr) {
+        msg.msg_name = &conn->ip;
+        msg.msg_namelen = sizeof(struct sockaddr_in);
+    } else {
+        msg.msg_name = NULL;
+        msg.msg_namelen = 0;
     }
-
-    msg.msg_name = NULL;
-    msg.msg_namelen = 0;
-    iovec.iov_base = tmp_conn->pkt.buff;
+    iovec.iov_base = conn->pkt.buff;
     iovec.iov_len = MSG_MAX_LEN;
     msg.msg_iov = &iovec;
     msg.msg_iovlen = 1;
     msg.msg_control = NULL;
     msg.msg_controllen = 0;
-    
-    len = recvmsg(w->fd, &msg, 0);
-    if (len < 0) {
+
+    /* 接收数据 */
+    len = recvmsg(conn->read.fd, &msg, 0);
+    if (len < 0) {           /* 错误 */
         if (errno == EAGAIN
             || errno == EINTR
             || errno == EWOULDBLOCK) {
-            printf("%s/%s/%d\n", __FILE__, __func__, __LINE__);
-            /* do nothing */
+            MY_WARN("%s", strerror(errno));
         }
         return;
-    } else if (len == 0) {
-        printf("%s/%s/%d\n", __FILE__, __func__, __LINE__);
-        clear_conn_res(tmp_conn);
+    } else if (len == 0) {   /* 收到FIN报文 */
+        MY_WARN("%s", "recv FIN!!!");
+        if (close_conn_when_fin) {
+            clear_conn_res(conn);
+        }
         return;
     }
+    conn->pkt.len = len;
 
-    tmp_conn->pkt.len = len;
-    tmp_conn->rcb(&tmp_conn->pkt);
+    /* 调用用户注册的回调 */
+    conn->rcb(&conn->pkt);
 }
-
-static void do_tcp_write(EV_P_ ev_io *w, int revents)
+static void do_generic_write(SOCK_CONN* conn, bool set_remote_addr)
 {
-    SOCK_CONN *tmp_conn = (SOCK_CONN *)w->data;
-    
-    printf("%s\n", __func__);
-    if (revents & EV_ERROR) {
-        printf("%s/%s/%d\n", __FILE__, __func__, __LINE__);
-        return;
+    /* 发送数据前初始化 */
+    if (set_remote_addr) {
+        msg.msg_name = &conn->ip;
+        msg.msg_namelen = sizeof(struct sockaddr_in);
+    } else {
+        msg.msg_name = NULL;
+        msg.msg_namelen = 0;
     }
-    
-    msg.msg_name = NULL;
-    msg.msg_namelen = 0;
-    iovec.iov_base = tmp_conn->pkt.buff;
-    iovec.iov_len = tmp_conn->pkt.len;
+    iovec.iov_base = conn->pkt.buff;
+    iovec.iov_len = conn->pkt.len;
     msg.msg_iov = &iovec;
     msg.msg_iovlen = 1;
     msg.msg_control = NULL;
     msg.msg_controllen = 0;
 
-    /* FIXME：发送成功判断？？？ */
-    int len = sendmsg(w->fd, &msg, MSG_DONTWAIT);
-    printf("server send %d\n", len);
-    ev_io_stop(EV_A_  &tmp_conn->write);
-    
-    if (tmp_conn->wcb) {
-        tmp_conn->wcb(&tmp_conn->pkt);
+    /* 发送数据，尝试3次 */
+    int count = 0;
+    do {
+        int len = sendmsg(conn->write.fd, &msg, MSG_DONTWAIT);
+        if (len<0) {
+            MY_ERR("%s", strerror(errno));
+            break;
+        } else {
+            iovec.iov_base = conn->pkt.buff + len;
+            iovec.iov_len = conn->pkt.len - len;
+        }
+    } while ((iovec.iov_len > 0) && (count++ < 3));
+    if (count >= 3) {
+        MY_ERR("%s, count[%d]", "send failed", count);
     }
+
+    /* 关闭写事件 */
+    ev_io_stop(EV_A_  &conn->write);
+
+    /* 写成功后调用用户注册的回调 */
+    if (conn->wcb) {
+        conn->wcb(&conn->pkt);
+    }
+}
+
+/* tcp链路EV_READ事件入口 */
+static void do_tcp_read(EV_P_ ev_io *w, int revents)
+{
+    SOCK_CONN *tmp_conn = (SOCK_CONN *)w->data;
+
+    if (revents & EV_ERROR) {
+        MY_ERR("%s", "rece EV_ERROR");
+        return;
+    }
+
+    do_generic_read(tmp_conn, false, true);
+}
+
+/* tcp链路EV_WRITE事件入口 */
+static void do_tcp_write(EV_P_ ev_io *w, int revents)
+{
+    SOCK_CONN *tmp_conn = (SOCK_CONN *)w->data;
+    
+    if (revents & EV_ERROR) {
+        MY_ERR("%s", "rece EV_ERROR");
+        return;
+    }
+    
+    do_generic_write(tmp_conn, false);
 }
 
 /**
@@ -183,24 +235,22 @@ static void do_tcp_write(EV_P_ ev_io *w, int revents)
 static void do_accept(EV_P_ ev_io *w, int revents)
 {
     SOCK_CONN *tmp_conn;
-    int len;
     int fd;
 
-    printf("%s\n", __func__);
     if (revents & EV_ERROR) {
-        printf("%s/%s/%d\n", __FILE__, __func__, __LINE__);
+        MY_ERR("%s", "rece EV_ERROR");
         return;
     }
     tmp_conn = get_conn();
     if (tmp_conn == NULL) {
-        printf("%s/%s/%d\n", __FILE__, __func__, __LINE__);
+        MY_ERR("%s", "get conn failed");
         return;
     }
     
-    len = sizeof(tmp_conn->cip);
-    fd = accept(w->fd, (struct sockaddr*)&tmp_conn->cip, (socklen_t *)&len);
+    int len = sizeof(tmp_conn->ip);
+    fd = accept(w->fd, (struct sockaddr*)&tmp_conn->ip, (socklen_t *)&len);
     if (fd == -1) {
-        printf("%s/%s/%d\n", __FILE__, __func__, __LINE__);
+        MY_ERR("%s", strerror(errno));
         free_conn(tmp_conn);
         return;
     }
@@ -216,82 +266,239 @@ static void do_accept(EV_P_ ev_io *w, int revents)
     ev_io_start(EV_A_  &tmp_conn->read);
 }
 
-/**
- * UDP监听接口的读处理函数，记录客户端信息，并读取数据；
- * 数据读取完毕后，调用注册的处理回调
- */
+/* UDP链路EV_READ事件入口 */
 static void do_udp_read(EV_P_ ev_io *w, int revents)
 {
     SOCK_CONN *tmp_conn = (SOCK_CONN *)w->data;
-    int len;
 
     if (revents & EV_ERROR) {
-        return;
-    }
-    
-    /* 接收数据 */
-    msg.msg_name = &tmp_conn->cip;
-    msg.msg_namelen = sizeof(tmp_conn->cip);
-    iovec.iov_base = tmp_conn->pkt.buff;
-    iovec.iov_len = MSG_MAX_LEN;
-    msg.msg_iov = &iovec;
-    msg.msg_iovlen = 1;
-    msg.msg_control = NULL;
-    msg.msg_controllen = 0;
-    
-    len = recvmsg(w->fd, &msg, 0);
-    if (len < 0) {          /* 错误 */
-        if (errno == EAGAIN
-            || errno == EINTR
-            || errno == EWOULDBLOCK) {
-            /* do nothing */
-        }
-        return;
-    } else if (len == 0) {  /* 收到了FIN??? */
+        MY_ERR("%s", "rece EV_ERROR");
         return;
     }
 
-    /* 处理数据 */
-    tmp_conn->pkt.len = len;
-    tmp_conn->pkt.buff[len] = 0;
-    tmp_conn->rcb(&tmp_conn->pkt);
+    do_generic_read(tmp_conn, true, false);
+}
+static void do_cudp_read(EV_P_ ev_io *w, int revents)
+{
+    SOCK_CONN *tmp_conn = (SOCK_CONN *)w->data;
+    struct sockaddr_in sip;
+    
+    if (revents & EV_ERROR) {
+        MY_ERR("%s", "rece EV_ERROR");
+        return;
+    }
+
+    /* 做为UDP客户端时，收到的远端IP地址可能不是对应的服务器IP地址；因此
+       此处先保存此链接的服务器IP地址，接收数据报文后再恢复。
+
+       做为UDP服务器时，不存在此问题，必须保存远端IP地址，以便回应时使用 */
+    /* FIXME：如果收到的报文非原链接的服务器IP地址，报文应该直接丢弃!!! */
+    (void)memcpy(&sip, &tmp_conn->ip, sizeof(struct sockaddr_in));
+    do_generic_read(tmp_conn, true, false);
+    (void)memcpy(&tmp_conn->ip, &sip, sizeof(struct sockaddr_in));
 }
 
-/**
- * UDP监听接口的写处理函数, 回应客户端
- */
+/* UDP链路EV_WRITE事件入口 */
 static void do_udp_write(EV_P_ ev_io *w, int revents)
 {
     SOCK_CONN *tmp_conn = (SOCK_CONN *)w->data;
 
     if (revents & EV_ERROR) {
+        MY_ERR("%s", "rece EV_ERROR");
         return;
     }
-    
-    msg.msg_name = &tmp_conn->cip;
-    msg.msg_namelen = sizeof(tmp_conn->cip);
-    iovec.iov_base = tmp_conn->pkt.buff;
-    iovec.iov_len = tmp_conn->pkt.len;
-    msg.msg_iov = &iovec;
-    msg.msg_iovlen = 1;
-    msg.msg_control = NULL;
-    msg.msg_controllen = 0;
 
-    /* FIXME：发送成功判断？？？ */
-    (void)sendmsg(w->fd, &msg, MSG_DONTWAIT);
-    ev_io_stop(EV_A_  &tmp_conn->write);
+    do_generic_write(tmp_conn, true);
+}
+
+/* 宏：获取链接结构，并初始化；初始化服务器IP；*/
+#define INIT_CONN_AND_SIP do {                              \
+        tmp_conn = get_conn();                              \
+        if (tmp_conn == NULL) {                             \
+            goto JUST_RET;                                  \
+        }                                                   \
+        tmp_conn->rcb = rcb;                                \
+        tmp_conn->wcb = wcb;                                \
+        tmp_conn->read.data = tmp_conn;                     \
+        tmp_conn->write.data = tmp_conn;                    \
+                                                            \
+        (void)memset(&sip, 0, sizeof(struct sockaddr_in));   \
+        sip.sin_family = AF_INET;                          \
+        sip.sin_port = htons(port);                        \
+        if(inet_pton(AF_INET, ip, &sip.sin_addr) <= 0) {   \
+            goto FREE;                                      \
+        }                                                   \
+    } while(0);
+
+
+
+int watch_tcp(char *ip, unsigned short port, io_callback rcb, io_callback wcb)
+{
+    struct sockaddr_in sip;
+    SOCK_CONN *tmp_conn = NULL;
+    int fd;
+
+    INIT_CONN_AND_SIP;
     
-    if (tmp_conn->wcb) {
-        tmp_conn->wcb(&tmp_conn->pkt);
+    fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd == -1) {
+        MY_ERR("%s", strerror(errno));
+        goto FREE;
     }
+    
+    int flag = 1;                  /* 设置地址重用，非阻塞模式 */
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
+    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) == -1) {
+        MY_ERR("%s", strerror(errno));
+        goto CLOSEFD;        
+    }
+
+    if (bind(fd, (const struct sockaddr *)&sip, sizeof(struct sockaddr_in)) == -1) {
+        MY_ERR("%s", strerror(errno));
+        goto CLOSEFD;
+    }
+
+    if (listen(fd, 512) == -1) {   /* magic 512: linux系统推荐值 */
+        MY_ERR("%s", strerror(errno));
+        goto CLOSEFD;
+    }
+    
+    ev_io_init(&tmp_conn->read, do_accept, fd, EV_READ);
+    ev_io_start(EV_A_  &tmp_conn->read);
+
+    return RET_OK;
+CLOSEFD:
+    close(fd);
+FREE:
+    free_conn(tmp_conn);
+JUST_RET:
+    return RET_ERR;
+}
+
+int watch_udp(char *ip, unsigned short port, io_callback rcb, io_callback wcb)
+{
+    struct sockaddr_in sip;
+    SOCK_CONN *tmp_conn = NULL;
+    int fd;
+
+    INIT_CONN_AND_SIP;
+    
+    fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd == -1) {
+        MY_ERR("%s", strerror(errno));
+        goto FREE;
+    }
+    
+    int flag = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
+    if (bind(fd, (const struct sockaddr *)&sip, sizeof(struct sockaddr_in)) == -1) {
+        MY_ERR("%s", strerror(errno));        
+        goto CLOSEFD;
+    }
+
+    ev_io_init(&tmp_conn->read, do_udp_read, fd, EV_READ);
+    ev_io_init(&tmp_conn->write, do_udp_write, fd, EV_WRITE);
+    ev_io_start(EV_A_  &tmp_conn->read);
+
+    return RET_OK;
+CLOSEFD:
+    close(fd);
+FREE:
+    free_conn(tmp_conn);
+JUST_RET:
+    return RET_ERR;
+}
+
+PKT *alloc_tcp(char *ip, unsigned short port, io_callback rcb, io_callback wcb)
+{
+    struct sockaddr_in sip;
+    SOCK_CONN *tmp_conn = NULL;
+    int fd;
+    
+    INIT_CONN_AND_SIP;
+    
+    fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd == -1) {
+        MY_ERR("%s", strerror(errno));
+        goto FREE;
+    }
+
+    int flag = 1;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) == -1) {
+        MY_ERR("%s", strerror(errno));
+        goto CLOSEFD;        
+    }
+    
+    if (connect(fd, (const struct sockaddr *)&sip, sizeof(struct sockaddr_in)) == -1) {
+        if (errno != EINPROGRESS) {
+            MY_ERR("%s", strerror(errno));
+            goto CLOSEFD;
+        }
+    }
+
+    ev_io_init(&tmp_conn->read, do_tcp_read, fd, EV_READ);
+    ev_io_init(&tmp_conn->write, do_tcp_write, fd, EV_WRITE);
+    ev_io_start(EV_A_  &tmp_conn->read);
+
+    goto JUST_RET;
+CLOSEFD:
+    close(fd);
+FREE:
+    free_conn(tmp_conn);
+    tmp_conn = NULL;
+JUST_RET:
+    return (tmp_conn?&(tmp_conn->pkt):NULL);
+}
+
+PKT *alloc_udp(char *ip, unsigned short port, io_callback rcb, io_callback wcb)
+{
+    SOCK_CONN *tmp_conn = NULL;
+    struct sockaddr_in sip;
+    int fd;
+    
+    INIT_CONN_AND_SIP;
+    (void)memcpy(&tmp_conn->ip, &sip, sizeof(struct sockaddr_in));
+    
+    fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd == -1) {
+        MY_ERR("%s", strerror(errno));
+        goto FREE;
+    }
+
+    ev_io_init(&tmp_conn->read, do_cudp_read, fd, EV_READ);
+    ev_io_init(&tmp_conn->write, do_udp_write, fd, EV_WRITE);
+    ev_io_start(EV_A_  &tmp_conn->read);
+
+    goto JUST_RET;
+FREE:
+    free_conn(tmp_conn);
+    tmp_conn = NULL;
+JUST_RET:
+    return (tmp_conn?&(tmp_conn->pkt):NULL);
+}
+
+int send_pkt(PKT *pkt)
+{
+    SOCK_CONN *tmp_conn = (SOCK_CONN*)pkt;
+    ev_io_start(EV_A_  &tmp_conn->write);
+    
+    return RET_OK;
+}
+
+int close_pkt(PKT *pkt)
+{
+    SOCK_CONN *tmp_conn = (SOCK_CONN*)pkt;
+    clear_conn_res(tmp_conn);
+    
+    return RET_OK;
 }
 
 
 int libev_init()
 {
     /* 当对端read插口关闭时，write()会触发SIGPIPE信号； 如果屏蔽掉，
-       则会返回错误EPIPE，被错误判断捕捉；如果不屏蔽，则默认导致进
-       程退出 */
+     则会返回错误EPIPE，被错误判断捕捉；如果不屏蔽，则默认导致进
+     程退出 */
     signal(SIGPIPE, SIG_IGN);
 
     /* 初始化事件循环 */
@@ -318,145 +525,4 @@ void event_loop(void)
 
     /* 开启libev事件循环 */
     ev_run(EV_A_ 0);
-}
-
-int watch_tcp(char *ip, unsigned short port, io_callback rcb, io_callback wcb)
-{
-    struct sockaddr_in sip;
-    SOCK_CONN *tmp_conn = NULL;
-    int fd;
-    int ret = RET_ERR;
-    
-    tmp_conn = get_conn();
-    if (tmp_conn == NULL) {
-        goto TCP_RET;
-    }
-    tmp_conn->rcb = rcb;
-    tmp_conn->wcb = wcb;
-    tmp_conn->read.data = tmp_conn;
-    tmp_conn->write.data = tmp_conn;
-
-    (void)memset(&sip, 0, sizeof(sip));
-    sip.sin_family = AF_INET;
-    sip.sin_port = htons(port);
-    if(inet_pton(AF_INET, ip, &sip.sin_addr) <= 0) {
-        goto TCP_FREE;
-    }
-    
-    fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (fd == -1) {
-        goto TCP_FREE;
-    }
-    
-    /* 设置地址重用，非阻塞模式 */
-    int flag = 1;
-    if((setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag))) == -1) {
-        /* do nothing */
-    }
-    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) == -1) {
-        goto TCP_CLOSEFD;        
-    }
-
-    if (bind(fd, (const struct sockaddr *)&sip, sizeof(sip)) == -1) {
-        goto TCP_CLOSEFD;
-    }
-
-    if (listen(fd, 512) == -1) {   /* magic 512: linux系统推荐值 */
-        goto TCP_CLOSEFD;
-    }
-
-    
-    ev_io_init(&tmp_conn->read, do_accept, fd, EV_READ);
-    ev_io_start(EV_A_  &tmp_conn->read);
-
-    ret = RET_OK;
-    goto TCP_RET;
-TCP_CLOSEFD:
-    close(fd);
-TCP_FREE:
-    free_conn(tmp_conn);
-TCP_RET:
-    return ret;
-}
-
-int watch_udp(char *ip, unsigned short port, io_callback rcb, io_callback wcb)
-{
-    struct sockaddr_in sip;
-    SOCK_CONN *tmp_conn = NULL;
-    int fd;
-    int ret = RET_ERR;
-    
-    tmp_conn = get_conn();
-    if (tmp_conn == NULL) {
-        goto UDP_RET;
-    }
-    tmp_conn->rcb = rcb;
-    tmp_conn->wcb = wcb;
-    tmp_conn->read.data = tmp_conn;
-    tmp_conn->write.data = tmp_conn;
-    
-    (void)memset(&sip, 0, sizeof(sip));
-    sip.sin_family = AF_INET;
-    sip.sin_port = htons(port);
-    if(inet_pton(AF_INET, ip, &sip.sin_addr) <= 0) {
-        goto UDP_FREE;
-    }
-    
-    fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (fd == -1) {
-        goto UDP_FREE;
-    }
-    
-    /* 设置地址重用，非阻塞模式 */
-    int flag = 1;
-    if((setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag))) == -1) {
-        /* do nothing */
-    }
-    if (bind(fd, (const struct sockaddr *)&sip, sizeof(sip)) == -1) {
-        goto UDP_CLOSEFD;
-    }
-
-
-    /* 加入并启动事件循环，仅监控读事件 */
-    ev_io_init(&tmp_conn->read, do_udp_read, fd, EV_READ);
-    ev_io_init(&tmp_conn->write, do_udp_write, fd, EV_WRITE);
-    ev_io_start(EV_A_  &tmp_conn->read);
-
-    ret = RET_OK;
-    goto UDP_RET;
-UDP_CLOSEFD:
-    close(fd);
-UDP_FREE:
-    free_conn(tmp_conn);
-UDP_RET:
-    return ret;
-}
-
-PKT *alloc_tcp(char *ip, unsigned short port, io_callback rcb, io_callback wcb)
-{
-    return NULL;
-}
-
-PKT *alloc_udp(char *ip, unsigned short port, io_callback rcb, io_callback wcb)
-{
-    return NULL;
-}
-
-int send_pkt(PKT *pkt)
-{
-    printf("%s\n", __func__);
-    SOCK_CONN *tmp_conn = (SOCK_CONN*)pkt;
-    ev_io_start(EV_A_  &tmp_conn->write);
-    
-    return RET_OK;
-}
-
-int close_pkt(PKT *pkt)
-{
-    SOCK_CONN *tmp_conn = (SOCK_CONN*)pkt;
-
-    printf("%s\n", __func__);
-    clear_conn_res(tmp_conn);
-    
-    return RET_OK;
 }

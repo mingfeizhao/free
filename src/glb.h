@@ -1,12 +1,13 @@
 #ifndef _GLB_H_
 #define _GLB_H_
 
+#include <errno.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <errno.h>
 
 /* 定义通用返回值 */
 #define RET_OK      0
