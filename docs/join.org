@@ -1,0 +1,276 @@
+#+TITLE: join流程简介
+#+AUTHOR: sqlfocus
+
+
+本文档描述终端设备join组网的流程，重点关注交互流程、及报文格式，为设计
+程序架构备忘！
+
+* 简介
+join分两种情况，手工加入、自动协商，本文档主要关注自动协商。当终端设备
+失去和网关的联系后(lost the session context information)，即开启自动协
+商组网流程。
+
+* LoRaWAN帧格式
+** 上行帧
+|----------+------+----------+------------+-----|
+| Preamble | PHDR | PHDR_CRC | PHYPayload | CRC |
+|----------+------+----------+------------+-----|
+其中Preamble、PHDR、PHDR_CRC、CRC是由支持LoRaWAN的硬件加、解封装，与应
+用开发无关，暂且不关注；仅需要关注PHYPayload，即LoRaWAN承载的真实数据。
+
+** 下行帧
+|----------+------+----------+------------|
+| Preamble | PHDR | PHDR_CRC | PHYPayload |
+|----------+------+----------+------------|
+
+** PHYPayload
+|------+--------------+-----|
+| MHDR | Join-Request | MIC |
+|------+--------------+-----|
+
+|------+---------------+-----|
+| MHDR | Join-Response | MIC |
+|------+---------------+-----|
+
+ #+BEGIN_EXAMPLE
+ Join-Request/MIC计算方式如下
+ cmac = aes128_cmac(AppKey, MHDR | AppEUI | DevEUI | DevNonce)
+ MIC = cmac[0..3]
+ #+END_EXAMPLE
+
+ #+BEGIN_EXAMPLE
+ join-response消息的MIC计算
+ cmac = aes128_cmac(AppKey, MHDR | AppNonce | NetID | DevAddr | DLSettings | RxDelay | CFList)
+ MIC = cmac[0..3]
+ #+END_EXAMPLE
+
+** MHDR
+|-----------+-------+------+-------|
+| Bit#      |  7..5 | 4..2 |  1..0 |
+|-----------+-------+------+-------|
+| MHDR bits | MType |  RFU | Major |
+|-----------+-------+------+-------|
+
+MType, message type，消息类型
+ - 000    :: join request
+ - 001    :: join accept
+
+Major，major verson，LoRa协议版本号
+ - 00     :: LoRa R1, 目前为第一版
+
+** Join-Request
+当终端设备和gateway长时间失去联系后，需要重新发起入网请求。
+|--------------+--------+--------+----------|
+| Size (bytes) |      8 |      8 |        2 |
+|--------------+--------+--------+----------|
+| Join Request | AppEUI | DevEUI | DevNonce |
+|--------------+--------+--------+----------|
+
+DevNonce: random value，终端设备产生的随机数，避免重复加入(由服务器记录每终
+          端设备产生的随机数，如果发现使用过的随机数，视此消息无效)；用于计
+          算NwkSKey/AppSKey
+
+** Join-Response
+当服务器决定接受终端设备的入网申请后，通过回复此消息同意其加入；不同意加入，
+则不回应。
+|--------------+----------+-------+---------+------------+---------+---------------|
+| Size (bytes) |        3 |     3 |       4 |          1 |       1 | (16) Optional |
+|--------------+----------+-------+---------+------------+---------+---------------|
+| Join Accept  | AppNonce | NetID | DevAddr | DLSettings | RxDelay | CFList        |
+|--------------+----------+-------+---------+------------+---------+---------------|
+
+ #+BEGIN_EXAMPLE
+ join-response消息加密
+ aes128_decrypt(AppKey, AppNonce | NetID | DevAddr | DLSettings | RxDelay | CFList | MIC)
+ #+END_EXAMPLE
+
+ #+BEGIN_EXAMPLE
+ NwkSKey/AppSKey计算方式
+ NwkSKey = aes128_encrypt(AppKey, 0x01 | AppNonce | NetID | DevNonce | pad16)
+ AppSKey = aes128_encrypt(AppKey, 0x02 | AppNonce | NetID | DevNonce | pad16)
+ #+END_EXAMPLE
+
+字段解释
+ - AppNonce   :: application nonce, 应用层随机数
+    : 被终端设备利用生成NwkSKey/AppSKey
+ - NetID      :: network identifier
+ - DevAddr    :: end-device address
+ - RxDelay    :: delay between TX and RX
+ - CFList     :: optional list of channel frequencies
+ - DLSettings :: 下行配置
+
+*** DevAddr
+|--------------+----------+---------|
+| Bit#         | [31..25] | [24..0] |
+|--------------+----------+---------|
+| DevAddr bits | NwkID    | NwkAddr |
+|--------------+----------+---------|
+
+NwkID: network identifier, 隔离重叠网络的设备地址，类似于子网的概念
+NwkAddr: 设备地址，由服务器自由赋值
+
+*** NetID
+|------------+---------+--------|
+| Bit#       | [23..7] | [6..0] |
+|------------+---------+--------|
+| NetID bits | unknown | NwkID  |
+|------------+---------+--------|
+NwkID: 同DevAddr的NwkID
+unknown: 由服务器随意赋值
+
+*** DLSettings
+下行链路配置，downlink configuration，格式如下：
+|------------+-----+-------------+---------------|
+| Bits       |   7 |         6:4 |           3:0 |
+|------------+-----+-------------+---------------|
+| DLsettings | RFU | RX1DRoffset | RX2 Data rate |
+|------------+-----+-------------+---------------|
+
+*** RxDelay
+此值设置上行数据发送完毕后，至第一个下行窗口RX1的延迟，单位秒；第二个下行
+窗口在第一个RX1后1s开启。
+|----------+-----+-----|
+| Bits     | 7:4 | 3:0 |
+|----------+-----+-----|
+| Settings | RFU | Del |
+|----------+-----+-----|
+
+RX1DRoffset: CLASS A模式，上行速率与RX1窗口下行速率的偏差，默认值0
+
+* 状态维护
+** 终端
+协商前需预置信息，如下
+ - DevEUI
+ - AppEUI
+ - AppKey         :: an AES-128 key
+   : 由application-specific root key生成
+   : 协商过程中，被用来生成NwkSKey、AppSKey
+   : 生成join-request消息的MIC
+
+** 服务器
+ - AppEUI        :: 预置
+ - AppKey        :: 预置
+ - DevAddr       :: 自生成
+ - DevEUI        :: 预置
+ - DevNonce数组  :: 跟踪终端设备join-request消息，防止重复加入
+ - NetID         :: 自生成
+ - AppSKey       :: 自生成
+ - NwkSKey       :: 自生成
+ 
+* 交互报文
+** mote to gateway
+[14:46:05:521](wire+TX) FF AA C6 00 43 B0 40
+
+** gateway to mote
+[14:46:05:756](wire+RX) FF AA 66 01 00 F0 43 40
+[14:46:12:539](wire+RX) FF AA 70 01 00 11 87 40
+
+** gateway to nserver
+{
+  "rxpk":[
+           {
+             "tmst":165676164,
+             "time":"1970-01-01T00:02:47.103000Z",
+             "chan":4,
+             "rfch":1,
+             "freq":471.100000,
+             "stat":1,
+             "modu":"LORA",
+             "datr":"SF9BW125",
+             "codr":"4/5",
+             "lsnr":9.5,
+             "rssi":-83,
+             "size":23,
+             "data":"AAEAAAAAAACAUAAABwQXCwBSL6TrlSA="       LoRaWAN帧
+           }
+         ]
+}
+
+** nserver to gateway
+{
+  "txpk":{
+    "imme":false,
+    "tmst":338154460,
+    "time":"2017-04-24T09:34:43.9912690Z",
+    "freq":501.1,
+    "rfch":1,
+    "powe":23,
+    "modu":"LORA",
+    "datr":"SF9BW125",
+    "codr":"4/5",
+    "fdev":0,
+    "ipol":true,
+    "prea":8,
+    "size":17,
+    "data":"IDndWacx4EJ1SQ+xJyUfzoM=",                       LoRaWAN帧
+    "ncrc":false
+  }
+}
+
+** nerserver to aserver
+{
+  "join":{
+    "moteeui":3121530808565840,
+    "appeui":9223372036854775809,
+    "accept":true,
+    "request":null,
+    "details":null,
+    "complete":null
+  }
+}
+
+** aserver to nserver
+{
+  "join":{
+    "moteeui":3121530808565840,
+    "appeui":0,
+    "accept":false,
+    "request":null,
+    "details":null,
+    "complete":{
+      "frame":"ICfs4B6g0yCyGhjKag1/p8I=",
+      "networkkey":"seF1B71l0WrHew2bQxSSIw==",
+      "appskey":"YGXFex7kbo2SaTpg87fzzA==",
+      "RX1DRoffset":0,
+      "RX2DR":0,
+      "RXDelay":1
+    }
+  }
+}
+
+* 手工加入
+不需要发送join-request/join-accept消息，由手工直接组网；需要在终端设备预置
+协商结果信息：
+ - NwkSKey
+ - AppSKey
+ - DevAddr
+
+* 名次解释
+ - AppSKey        :: Application session key，协商后，加解密应用数据及校验应用层MIC
+ - AServer        :: 负责处理应用层的服务器
+ - AppEUI         :: global application identifier, 标识应用程序
+ - DevEUI         :: globally unique end-device identifier，标识终端设备
+ - gateway        :: 网关
+ - MIC            :: message integrity code, 消息完整性验证码
+ - mote           :: 终端
+ - NServer        :: 负责处理LoRa层的服务器
+ - NwkSKey        :: network session key，协商后，校验报文消息外层MIC
+ - RFU            :: reserve for fulture, 预留字段
+ - 上行           :: 数据流由终端经网关到服务程序
+ - 下行           :: 数据流由服务程序经网关到终端
+
+* 疑问
+ - DevAddr中NwkID如何赋值？
+ - Join-Response/DLsettings如何设置？
+ - Join-Response/DLsettings中RX1DRoffset值代表“上行-下行”还是“下行-上行”？
+ - Join-Response/DLsettings中RX2 Data rate如何利用？
+ - Join-Response/RxDelay如何设置？
+ - Join-Response/CFList如何设置？
+ - RX2在RX1 1s后开启，是相对于RX1起始还是结束？
+ - 加解密算法？
+ - gateway与nserver之间的数据报文，json封装除data外，其他字段收、发为何不一致？收如何处理(数据库操作、记录gateway状态)、发如何赋值？
+ - nserver到aserver数据报文，是否少devnonce？
+ - aserver到nserver数据报文，字段request/details/complete-frame分别什么含义？
+ - ACK报文格式？lora协议未提到，为何需要ack？
+
+
