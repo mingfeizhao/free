@@ -261,16 +261,29 @@ RX1DRoffset: CLASS A模式，上行速率与RX1窗口下行速率的偏差，默
 
 * 疑问
  - DevAddr中NwkID如何赋值？
+    预置在Nserver的配置参数中，用于区别不同的NServer，用于结点在不同网络之间漫游的网络识别。
  - Join-Response/DLsettings如何设置？
+   参考LoRaWAN协议或者C#版的代码。DLSetting中的参数是提前预置到Aserver中。实际中DLSetting可以选择没有。 DLSetting的主要作用是结点在入网的时候分配频点和相应的参数。如果没有这个参数，则按照结点默认的参数执行。是否有DLSetting这个参数有optlen里面判断。
  - Join-Response/DLsettings中RX1DRoffset值代表“上行-下行”还是“下行-上行”？
+    这个指的是第一个接收窗口的速率便宜。如果这个值为1，那么结点上行数率 为2，则下行第一个窗口的速率为 2-1=1 。上行和下行保持一致才能正常通信
  - Join-Response/DLsettings中RX2 Data rate如何利用？
+   也是预置在Nserver中的，默认值要参考不同的标准（CN470，EU433，US915都不一样）
  - Join-Response/RxDelay如何设置？
+   预置在Nserver中，默认值为1.
  - Join-Response/CFList如何设置？
  - RX2在RX1 1s后开启，是相对于RX1起始还是结束？
+ 结点发送结束为计算起点，1S后处于接收状态开始接收数据，接收窗口只有10symbol的时长，如果速率为5则，接收窗口约 20ms。在20ms的时长中如果没有侦听到无线信号，结点将继续休眠
  - 加解密算法？
+   参考linux版的AES128bit 加密
  - gateway与nserver之间的数据报文，json封装除data外，其他字段收、发为何不一致？收如何处理(数据库操作、记录gateway状态)、发如何赋值？
+   问题不清楚
  - nserver到aserver数据报文，是否少devnonce？
+   devnounce 是在 数据报文中，不是在json格式报文中
  - aserver到nserver数据报文，字段request/details/complete-frame分别什么含义？
+   -request的内容及gateway收到的完整的无线报文用于Aserver判断MIC是否正确，Devnouce是否重复，该结点的DevEUI是否合法。如果都合法，则返回NServer ，join.accpet 为true 的报文。
+   -details 是Nserver接收到join.accpet 为true的报文后回复给Aserver的，主要包含Aserver计算key用的 devaddr 和NetID 。 devaddr 由Nserver分配，NetID为Nserver预置参数。
+   -complete 是Aserver收到Nserver的devaddr后打包返回给Nserver的报文。主要包含 frame= 完整要发给结点的数据。 networkkey=计算后的networksessionkey。 appskey=计算后的app sessiion key。 RX1DRoffet=窗口1的速率偏置， RX2DR=窗口2 速率，RXDelay=窗口1的延时长度 （窗口2与窗口1固定相差1秒）
  - ACK报文格式？lora协议未提到，为何需要ack？
+   参考 LoRaWAN1.0 的spec， 4.3.1 中 FCtrl中的 ACK位是对confirm包的ACK
 
 
